@@ -96,10 +96,15 @@ class Blocker
   end
 
   def batch_create_firewall_rule
+    threads = []
     ip_pool.each_slice(256).with_index do |ips, index|
       puts "Creating new firewall rules (batch #{index})"
-      create_firewall_rule(rule_name_with_index(index), ips)
+      threads << Thread.new do
+        create_firewall_rule(rule_name_with_index(index), ips)
+      end
     end
+    puts 'Waiting for all requests finished'
+    threads.each(&:join)
   end
 
   def create_firewall_rule(name, ips)
