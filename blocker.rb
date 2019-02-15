@@ -1,7 +1,6 @@
 require 'open3'
 
-# Script for blocking malicious IPs from https://github.com/stamparm/ipsum
-# using GCP compute firewall
+# Script for blocking malicious IPs using GCP compute firewall
 class Blocker
   attr_accessor :key_file, :project, :description, :priority
   attr_accessor :base_name, :time_stamp, :rule_name, :source_urls
