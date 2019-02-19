@@ -21,16 +21,22 @@ class Blocker
   end
 
   def run
-    puts 'Creating new firewall rules'
-    batch_create_firewall_rule
-    puts 'All new firewall rules created'
-    puts 'Deleting other firewall rules created by gcp-ip-blocker'
-    delete_firewall_rule(list_firewall_rule(rule_name))
-    puts 'All other firewall rules created by gcp-ip-blocker deleted'
+    batch_create_firewall_rules
+    handle_previous_firewall_rules
     puts "#{ip_pool.size} IP ranges were blocked"
   end
 
   private
+
+  def handle_previous_firewall_rules
+    old_rules = list_firewall_rule(rule_name)
+    unless old_rules.empty?
+      puts 'Deleting other firewall rules created by gcp-ip-blocker'
+      delete_firewall_rule(old_rules)
+      puts 'All other firewall rules created by gcp-ip-blocker deleted'
+    end
+    true
+  end
 
   def set_instance_vars
     self.key_file = ENV['KEY_FILE']
@@ -97,7 +103,8 @@ class Blocker
     base + options.join(' ')
   end
 
-  def batch_create_firewall_rule
+  def batch_create_firewall_rules
+    puts 'Creating new firewall rules'
     threads = []
     ip_pool.each_slice(256).with_index do |ips, index|
       threads << Thread.new do
@@ -106,6 +113,7 @@ class Blocker
     end
     puts 'Waiting for requests to finish'
     threads.each(&:join)
+    puts 'All new firewall rules created'
   end
 
   def create_firewall_rule(name, ips)
