@@ -1,8 +1,10 @@
-require 'open3'
+require 'net/http'
+require 'googleauth'
+require 'google/apis/compute_v1'
 
 # Script for blocking malicious IPs using GCP compute firewall
 class Blocker
-  attr_accessor :key_file, :project, :description, :priority
+  attr_accessor :key_file, :project, :description, :priority, :service
   attr_accessor :base_name, :time_stamp, :rule_name, :source_urls
 
   BASE_NAME = 'gcp-ip-blocker'.freeze
@@ -16,8 +18,7 @@ class Blocker
   def initialize
     check_required_envs
     set_instance_vars
-    gcloud_auth
-    gcloud_set_project
+    create_gcp_service
   end
 
   def run
@@ -32,7 +33,7 @@ class Blocker
     old_rules = list_firewall_rule(rule_name)
     unless old_rules.empty?
       puts 'Deleting other firewall rules created by gcp-ip-blocker'
-      delete_firewall_rule(old_rules)
+      batch_delete_firewall_rule(old_rules)
       puts 'All other firewall rules created by gcp-ip-blocker deleted'
     end
     true
@@ -65,79 +66,63 @@ class Blocker
     true
   end
 
-  def gcloud_auth
-    cmd = %(gcloud auth activate-service-account --key-file="#{key_file}")
-    stdout, stderr, s = ::Open3.capture3(cmd)
-    s.success? || abort("Fail to do gcloud auth:\n#{stdout}\n#{stderr}")
-  end
-
-  def gcloud_set_project
-    cmd = %(gcloud config set project "#{project}")
-    stdout, stderr, s = ::Open3.capture3(cmd)
-    s.success? || abort("Fail to set gcloud project:\n#{stdout}\n#{stderr}")
+  def create_gcp_service
+    self.service = Google::Apis::ComputeV1::ComputeService.new
+    scope = 'https://www.googleapis.com/auth/compute'
+    service.authorization = Google::Auth::ServiceAccountCredentials.make_creds(
+      json_key_io: File.open(key_file),
+      scope: scope
+    )
   end
 
   def ip_pool
-    return @ip_pool if @ip_pool
-
-    @ip_pool = []
-    source_urls.each do |url|
-      cmd = %(curl -sS --compressed "#{url}" | grep -v "#")
-      stdout, stderr, s = ::Open3.capture3(cmd)
-      s.success? || abort("Fail to get malicious IPs:\n#{stdout}\n#{stderr}")
-      @ip_pool += stdout.split
-    end
-    @ip_pool
-  end
-
-  def create_cmd(name, ips)
-    base = %(gcloud compute firewall-rules create "#{name}" )
-    options = [
-      '--action=DENY',
-      '--rules=all',
-      '--direction=INGRESS',
-      %(--source-ranges="#{ips.join(',')}"),
-      %(--description="#{description}"),
-      %(--priority="#{priority}")
-    ]
-    base + options.join(' ')
+    @ip_pool ||= source_urls.map do |url|
+      Net::HTTP.get(URI(url)).split("\n").grep_v(/#/)
+    end.reduce(:+)
   end
 
   def batch_create_firewall_rules
     puts 'Creating new firewall rules'
-    threads = []
-    ip_pool.each_slice(256).with_index do |ips, index|
-      threads << Thread.new do
-        create_firewall_rule(rule_name_with_index(index), ips)
+    service.batch do |service|
+      ip_pool.each_slice(256).with_index do |ips, index|
+        rule = firewall_rule_obj(ips, index)
+        service.insert_firewall(project, rule) do |_, err|
+          abort(err.to_s) if err
+        end
       end
     end
-    puts 'Waiting for requests to finish'
-    threads.each(&:join)
     puts 'All new firewall rules created'
   end
 
-  def create_firewall_rule(name, ips)
-    stdout, stderr, s = ::Open3.capture3(create_cmd(name, ips))
-    s.success? || abort("Fail to create firewall rule:\n#{stdout}\n#{stderr}")
+  def firewall_rule_obj(ips, index)
+    Google::Apis::ComputeV1::Firewall.new(
+      name: rule_name_with_index(index),
+      description: description,
+      priority: priority,
+      source_ranges: ips,
+      direction: 'INGRESS',
+      denied: [{ ip_protocol: 'all' }]
+    )
   end
 
   def list_firewall_rule(name)
-    base = %(gcloud compute firewall-rules list )
-    filter_str = %(description~'#{description}' AND NOT name~'#{name}')
-    options = %w[
-      --format="value(name)"
-    ] + [%(--filter="#{filter_str}")]
-    cmd = base + options.join(' ')
-    stdout, stderr, s = ::Open3.capture3(cmd)
-    s.success? || abort("Fail to list firewall rule:\n#{stdout}\n#{stderr}")
-    stdout.split
+    rules = service.fetch_all do |token|
+      service.list_firewalls(project, page_token: token)
+    end
+
+    rules.select do |rule|
+      rule.description =~ /#{description}/ && rule.name !~ /#{name}/
+    end.map(&:name)
   end
 
-  def delete_firewall_rule(names)
-    base = %(gcloud compute firewall-rules delete )
-    cmd = base + names.join(' ')
-    stdout, stderr, s = ::Open3.capture3(cmd)
-    s.success? || abort("Fail to delete firewall rule:\n#{stdout}\n#{stderr}")
+  def batch_delete_firewall_rule(names)
+    service.batch do |service|
+      names.each do |name|
+        service.delete_firewall(project, name) do |_, err|
+          abort(err.to_s) if err
+        end
+      end
+    end
   end
 end
 

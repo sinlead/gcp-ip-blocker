@@ -1,8 +1,8 @@
-FROM google/cloud-sdk
+FROM ruby:2.5
 LABEL maintainer "Sinlead <opensource@sinlead.com>"
-RUN set -ex; \
-  apt-get update; \
-  apt-get install -qq -y --no-install-recommends ruby; \
-  rm -rf /tmp/* /var/lib/apt/lists/*
-COPY blocker.rb /opt/sinlead/gcp-ip-blocker/blocker.rb
-CMD ["ruby", "/opt/sinlead/gcp-ip-blocker/blocker.rb"]
+ENV LANG="C.UTF-8" APP_PATH="/usr/src/gcp-ip-blocker/"
+WORKDIR $APP_PATH
+COPY Gemfile Gemfile.lock ./
+RUN bundle install
+COPY blocker.rb ./
+CMD ["ruby", "blocker.rb"]
